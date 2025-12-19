@@ -119,7 +119,6 @@ export default function VideoAnalyze() {
     onChange={(e) => {
       const f = e.target.files?.[0];
       if (!f) return;
-      setImgUrl(URL.createObjectURL(f));
       setReport(null);
       // allow re-uploading same file again
       e.currentTarget.value = "";

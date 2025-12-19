@@ -116,7 +116,8 @@ export function buildReport(result: PoseLandmarkerResult | null): PostureReport 
   if (lk && la) angles.leftKneeDeg = angleABC(lh, lk, la);
   if (rk && ra) angles.rightKneeDeg = angleABC(rh, rk, ra);
 
-  const issues = [];
+  const issues: PostureIssue[] = [];
+
 
   const neck = angles.neckFlexionDeg ?? 0;
   if (neck >= 35) {

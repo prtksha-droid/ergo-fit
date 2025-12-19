@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/lib/draw.ts","./src/lib/exporters.ts","./src/lib/poseengine.ts","./src/lib/posemath.ts","./src/pages/livecamera.tsx","./src/pages/photoanalyze.tsx","./src/pages/videoanalyze.tsx"],"version":"5.9.3"}

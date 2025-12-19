@@ -38,10 +38,13 @@ export function setRunningMode(mode: PoseMode) {
   landmarker.setOptions({ runningMode: mode === "IMAGE" ? "IMAGE" : "VIDEO" });
 }
 
-export function detectOnImage(img: CanvasImageSource): PoseLandmarkerResult | null {
+export function detectOnImage(
+  img: HTMLImageElement | HTMLCanvasElement | ImageBitmap | OffscreenCanvas
+): PoseLandmarkerResult | null {
   if (!landmarker) return null;
   return landmarker.detect(img);
 }
+
 
 export function detectOnVideo(video: HTMLVideoElement, timestampMs: number): PoseLandmarkerResult | null {
   if (!landmarker) return null;
