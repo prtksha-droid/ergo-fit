@@ -3,6 +3,10 @@ import { initPoseLandmarker, setRunningMode, detectOnImage } from "../lib/poseEn
 import { buildReport, type PostureReport } from "../lib/poseMath";
 import { drawPoseOverlay } from "../lib/draw";
 import { downloadCanvasPng, downloadJson } from "../lib/exporters";
+import { buildLeverReport } from "../lib/leverAnalysis";
+import { detectActionImage } from "../lib/actionDetector";
+import { estimateForceLevel } from "../lib/forceEstimator";
+import RightPanel from "../components/RightPanel";
 
 export default function PhotoAnalyze() {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -12,7 +16,7 @@ export default function PhotoAnalyze() {
   const [ready, setReady] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const [report, setReport] = useState<PostureReport | null>(null);
+  const [report, setReport] = useState<PostureReport | any | null>(null);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -36,26 +40,43 @@ export default function PhotoAnalyze() {
     const c = canvasRef.current;
 
     img.onload = () => {
-      c.width = img.naturalWidth;
-      c.height = img.naturalHeight;
+      c.width = img.naturalWidth || 1280;
+      c.height = img.naturalHeight || 720;
 
-      // Only run AI if it loaded; otherwise just show the image
+      // If AI not ready, just show the image (no overlay)
       if (!ready) return;
 
       setRunningMode("IMAGE");
       const res = detectOnImage(img);
       const rep = buildReport(res);
-      setReport(rep);
+
+      const leverBase = buildLeverReport(res, rep?.angles);
+      const action = detectActionImage(res);
+
+      const force = estimateForceLevel(
+        leverBase?.points?.wristMid ?? null,
+        leverBase?.lowBackMomentIndex ?? 0
+      );
+
+      const lever = leverBase ? { ...leverBase, force, action } : undefined;
+
+      const next = {
+        ...rep,
+        action,
+        lever,
+      };
+
+      setReport(next);
 
       drawPoseOverlay(
-  c,
-  res,
-  rep?.angles ?? null,
-  rep?.issues ?? null,
-  rep?.score,
-  rep?.risk
-);
-
+        c,
+        res,
+        rep?.angles ?? null,
+        rep?.issues ?? null,
+        rep?.score,
+        rep?.risk,
+        lever
+      );
     };
   }, [imgUrl, ready]);
 
@@ -74,7 +95,6 @@ export default function PhotoAnalyze() {
         <div className="cardHeader">
           <div className="cardTitle">Photo analysis</div>
 
-          {/* ✅ Upload ALWAYS active */}
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               className="btn btnPrimary"
@@ -93,18 +113,14 @@ export default function PhotoAnalyze() {
                 const f = e.target.files?.[0];
                 if (!f) return;
 
-                // reset previous overlay/report
                 setReport(null);
 
-                // clear canvas
                 if (canvasRef.current) {
                   const ctx = canvasRef.current.getContext("2d");
                   if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
                 }
 
                 setImgUrl(URL.createObjectURL(f));
-
-                // allow selecting same file again
                 e.currentTarget.value = "";
               }}
             />
@@ -112,86 +128,46 @@ export default function PhotoAnalyze() {
         </div>
 
         <div className="cardBody">
-          <div className="stageWrap" style={{ aspectRatio: "16/10" }}>
-            {imgUrl ? <img ref={imgRef} className="stageVideo" src={imgUrl} alt="uploaded" /> : null}
-            <canvas ref={canvasRef} className="stageCanvas" />
+          {/* Match LiveCamera layout: LEFT stage + RIGHT panel */}
+          <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr", gap: 14 }}>
+            {/* LEFT */}
+            <div>
+              <div className="stageWrap" style={{ aspectRatio: "16/10" }}>
+                {imgUrl ? <img ref={imgRef} className="stageVideo" src={imgUrl} alt="uploaded" /> : null}
+                <canvas ref={canvasRef} className="stageCanvas" />
+              </div>
+
+              <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={!canvasRef.current}
+                  onClick={() => canvasRef.current && downloadCanvasPng(canvasRef.current)}
+                >
+                  Export annotated PNG
+                </button>
+
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={!report}
+                  onClick={() => report && downloadJson(report)}
+                >
+                  Export JSON report
+                </button>
+
+                <span className={badgeClass}>{report?.risk ?? "—"}</span>
+              </div>
+
+              <div className="hint" style={{ marginTop: 10 }}>
+                {ready ? "AI ready (offline)." : "AI not ready yet — you can still upload photos."}
+                {err ? `  Error: ${err}` : ""}
+              </div>
+            </div>
+
+            {/* RIGHT */}
+            <RightPanel report={report} title="Details" />
           </div>
-
-          <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-            <button
-              className="btn"
-              type="button"
-              disabled={!canvasRef.current}
-              onClick={() => canvasRef.current && downloadCanvasPng(canvasRef.current)}
-            >
-              Export annotated PNG
-            </button>
-
-            <button
-              className="btn"
-              type="button"
-              disabled={!report}
-              onClick={() => report && downloadJson(report)}
-            >
-              Export JSON report
-            </button>
-          </div>
-
-          {/* Status text */}
-          <div className="hint">
-            {ready ? "AI ready (offline)." : "AI not ready yet — you can still upload photos."}
-            {err ? `  Error: ${err}` : ""}
-          </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="cardHeader">
-          <div className="cardTitle">Score & issues</div>
-          <span className={badgeClass}>{report?.risk ?? "—"}</span>
-        </div>
-
-        <div className="cardBody">
-          <div className="kpiRow">
-            <div className="kpi">
-              <div className="kpiLabel">ErgoScore</div>
-              <div className="kpiValue">{report ? report.score : "—"}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Neck</div>
-              <div className="kpiValue">{report ? `${report.angles.neckFlexionDeg?.toFixed(0) ?? "—"}°` : "—"}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Trunk</div>
-              <div className="kpiValue">{report ? `${report.angles.trunkLeanDeg?.toFixed(0) ?? "—"}°` : "—"}</div>
-            </div>
-          </div>
-
-          <div style={{ height: 12 }} />
-
-          {!ready ? (
-            <div className="small">
-              AI isn’t loaded, so analysis won’t run yet. Upload still works. Fix the model/WASM error above and refresh.
-            </div>
-          ) : !report?.issues?.length ? (
-            <div className="small">Upload a photo to get issues, risks, and fixes.</div>
-          ) : (
-            <div className="list">
-              {report.issues.map((i) => (
-                <div className="item" key={i.id}>
-                  <div className="itemTop">
-                    <div className="itemTitle">{i.title}</div>
-                    <span className={i.severity === "HIGH" ? "badge badgeBad" : i.severity === "MILD" ? "badge badgeWarn" : "badge badgeGood"}>
-                      {i.severity}
-                    </span>
-                  </div>
-                  <div className="itemText"><b>Measured:</b> {i.measured}</div>
-                  <div className="itemText"><b>Risk:</b> {i.whyItMatters}</div>
-                  <div className="itemText"><b>Fix:</b> {i.fix}</div>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

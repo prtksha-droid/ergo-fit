@@ -94,3 +94,38 @@ a { color: var(--accent); text-decoration: none; }
 .itemTitle { font-weight: 800; font-size: 13px; }
 .itemText { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.35; }
 .small { font-size: 12px; color: var(--muted); }
+
+.panel {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148,163,184,0.15);
+  background: rgba(2,6,23,0.35);
+  height: 100%;
+  overflow: auto;
+}
+
+.panelTitle { font-weight: 700; margin-bottom: 10px; }
+.panelSubTitle { font-weight: 600; margin: 10px 0 6px; opacity: 0.9; }
+
+.panelRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(148,163,184,0.10);
+}
+
+.label { opacity: 0.75; font-size: 12px; }
+.value { font-size: 12px; }
+
+.issueCard {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(148,163,184,0.12);
+  background: rgba(2,6,23,0.25);
+  margin-bottom: 8px;
+}
+.issueTitle { font-weight: 600; font-size: 13px; }
+.issueMeta { opacity: 0.8; font-size: 12px; margin-top: 4px; }
+.issueFix { font-size: 12px; margin-top: 6px; }
+.muted { opacity: 0.65; font-size: 12px; padding: 6px 0; }

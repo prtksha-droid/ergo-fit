@@ -3,81 +3,133 @@ import { initPoseLandmarker, setRunningMode, detectOnVideo } from "../lib/poseEn
 import { buildReport, type PostureReport } from "../lib/poseMath";
 import { drawPoseOverlay } from "../lib/draw";
 import { downloadJson } from "../lib/exporters";
+import { buildLeverReport } from "../lib/leverAnalysis";
+import { detectActionVideo, resetActionState } from "../lib/actionDetector";
+import { estimateForceLevel } from "../lib/forceEstimator";
+import RightPanel from "../components/RightPanel";
 
-type Sample = { t: number; score: number; risk: "Low"|"Medium"|"High" };
+type Sample = { t: number; score: number; risk: "Low" | "Medium" | "High" };
 
 export default function VideoAnalyze() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  const [ready, setReady] = useState(false);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<PostureReport | null>(null);
-  const [samples, setSamples] = useState<Sample[]>([]);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  const [ready, setReady] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [report, setReport] = useState<PostureReport | any | null>(null);
+  const [samples, setSamples] = useState<Sample[]>([]);
 
   useEffect(() => {
     (async () => {
-      await initPoseLandmarker();
-      setReady(true);
+      try {
+        resetActionState();
+        await initPoseLandmarker();
+        setReady(true);
+        setErr(null);
+      } catch (e: any) {
+        console.error(e);
+        setReady(false);
+        setErr(e?.message ?? String(e));
+      }
     })();
   }, []);
 
   useEffect(() => {
     let raf = 0;
-    let last = 0;
+    let lastSampleMs = 0;
 
     const loop = (t: number) => {
       raf = requestAnimationFrame(loop);
       if (!running) return;
-      if (!videoRef.current || !canvasRef.current) return;
-
-      // sample ~5 fps
-      if (t - last < 200) return;
-      last = t;
 
       const v = videoRef.current;
       const c = canvasRef.current;
+      if (!v || !c) return;
+      if (v.videoWidth === 0 || v.videoHeight === 0) return;
 
-      const vw = v.videoWidth || 1280;
-      const vh = v.videoHeight || 720;
-      if (c.width !== vw || c.height !== vh) { c.width = vw; c.height = vh; }
+      // sample ~5 fps
+      if (t - lastSampleMs < 200) return;
+      lastSampleMs = t;
+
+      if (c.width !== v.videoWidth) c.width = v.videoWidth;
+      if (c.height !== v.videoHeight) c.height = v.videoHeight;
 
       setRunningMode("VIDEO");
       const res = detectOnVideo(v, performance.now());
       const rep = buildReport(res);
-      if (rep) {
-        setReport(rep);
-        setSamples(prev => [...prev, { t: v.currentTime, score: rep.score, risk: rep.risk }].slice(-240));
-      }
-     drawPoseOverlay(
-  c,
-  res,
-  rep?.angles ?? null,
-  rep?.issues ?? null,
-  rep?.score,
-  rep?.risk
-);
 
+      const leverBase = buildLeverReport(res, rep?.angles);
+      const action = detectActionVideo(res);
+
+      const force = estimateForceLevel(
+        leverBase?.points?.wristMid ?? null,
+        leverBase?.lowBackMomentIndex ?? 0
+      );
+
+      const lever = leverBase ? { ...leverBase, force, action } : undefined;
+
+      const next = {
+        ...rep,
+        action,
+        lever,
+      };
+
+      setReport(next);
+
+      drawPoseOverlay(
+        c,
+        res,
+        rep?.angles ?? null,
+        rep?.issues ?? null,
+        rep?.score,
+        rep?.risk,
+        lever
+      );
+
+      // timeline
+      const timeSec = v.currentTime ?? 0;
+      setSamples((prev) => {
+        const risk = (rep?.risk ?? "Low") as any;
+        const score = Number(rep?.score ?? 0);
+        const nextSample: Sample = { t: timeSec, score, risk };
+        return prev.length > 500 ? [...prev.slice(-499), nextSample] : [...prev, nextSample];
+      });
     };
 
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [running]);
 
-  async function onLoadVideo() {
-    const v = videoRef.current;
-    if (!v) return;
-    await v.play();
-    v.pause();
+  async function onLoadedData() {
     setSamples([]);
     setReport(null);
+    resetActionState();
+
+    // Prime play/pause so dimensions are ready
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      await v.play();
+      v.pause();
+    } catch {
+      // ignore autoplay restrictions; user will click Start
+    }
   }
 
-  function start() { setRunning(true); videoRef.current?.play(); }
-  function stop() { setRunning(false); videoRef.current?.pause(); }
+  function start() {
+    if (!videoRef.current) return;
+    setRunning(true);
+    videoRef.current.play();
+  }
+
+  function stop() {
+    setRunning(false);
+    videoRef.current?.pause();
+  }
 
   const exportTimeline = () => {
     if (!report) return;
@@ -100,122 +152,82 @@ export default function VideoAnalyze() {
       <div className="card">
         <div className="cardHeader">
           <div className="cardTitle">Video analysis</div>
-          <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-  <button
-    className="btn btnPrimary"
-    disabled={!false}
-    onClick={() => fileRef.current?.click()}
-    type="button"
-  >
-    Upload photo
-  </button>
 
-  <input
-    ref={fileRef}
-    type="file"
-    accept="image/*"
-    style={{ display: "none" }}
-    onChange={(e) => {
-      const f = e.target.files?.[0];
-      if (!f) return;
-      setReport(null);
-      // allow re-uploading same file again
-      e.currentTarget.value = "";
-    }}
-  />
-</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button className="btn btnPrimary" type="button" onClick={() => fileRef.current?.click()}>
+              Upload video
+            </button>
 
-            <button className="btn" disabled={!videoUrl || running} onClick={start}>Start</button>
-            <button className="btn" disabled={!running} onClick={stop}>Stop</button>
-          </div>
-        </div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="video/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
 
-        <div className="cardBody">
-          <div className="stageWrap">
-            {videoUrl ? (
-              <video
-                ref={videoRef}
-                className="stageVideo"
-                src={videoUrl}
-                controls
-                playsInline
-                onLoadedData={onLoadVideo}
-              />
-            ) : null}
-            <canvas ref={canvasRef} className="stageCanvas" />
-          </div>
+                stop();
+                setReport(null);
+                setSamples([]);
 
-          <div className="hint">
-            This samples frames (~5 fps) and builds a timeline of risk. Works offline after first load.
-          </div>
+                const url = URL.createObjectURL(f);
+                setVideoUrl(url);
 
-          <div style={{display:"flex", gap:10, marginTop:12, flexWrap:"wrap"}}>
-            <button className="btn" disabled={!report} onClick={() => report && downloadJson(report)}>
+                e.currentTarget.value = "";
+              }}
+            />
+
+            <button className="btn" disabled={!videoUrl || !ready || running} onClick={start} type="button">
+              Start
+            </button>
+            <button className="btn" disabled={!running} onClick={stop} type="button">
+              Stop
+            </button>
+
+            <button className="btn" disabled={!report} onClick={() => report && downloadJson(report)} type="button">
               Export latest frame JSON
             </button>
-            <button className="btn" disabled={!samples.length} onClick={exportTimeline}>
+            <button className="btn" disabled={!samples.length} onClick={exportTimeline} type="button">
               Export timeline JSON
             </button>
           </div>
-
-          {samples.length ? (
-            <div className="hint">
-              Timeline samples: {samples.length} (latest time: {samples[samples.length-1].t.toFixed(1)}s)
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="cardHeader">
-          <div className="cardTitle">Current score & issues</div>
-          <span className={
-            report?.risk === "Low" ? "badge badgeGood" :
-            report?.risk === "Medium" ? "badge badgeWarn" :
-            report?.risk === "High" ? "badge badgeBad" : "badge"
-          }>
-            {report?.risk ?? "—"}
-          </span>
         </div>
 
         <div className="cardBody">
-          <div className="kpiRow">
-            <div className="kpi">
-              <div className="kpiLabel">ErgoScore</div>
-              <div className="kpiValue">{report ? report.score : "—"}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Neck</div>
-              <div className="kpiValue">{report ? `${report.angles.neckFlexionDeg?.toFixed(0) ?? "—"}°` : "—"}</div>
-            </div>
-            <div className="kpi">
-              <div className="kpiLabel">Trunk</div>
-              <div className="kpiValue">{report ? `${report.angles.trunkLeanDeg?.toFixed(0) ?? "—"}°` : "—"}</div>
-            </div>
-          </div>
+          {/* Match LiveCamera layout: LEFT stage + RIGHT panel */}
+          <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr", gap: 14 }}>
+            {/* LEFT */}
+            <div>
+              <div className="stageWrap" style={{ aspectRatio: "16/10" }}>
+                {videoUrl ? (
+                  <video
+                    ref={videoRef}
+                    className="stageVideo"
+                    src={videoUrl}
+                    controls
+                    playsInline
+                    onLoadedData={onLoadedData}
+                  />
+                ) : null}
+                <canvas ref={canvasRef} className="stageCanvas" />
+              </div>
 
-          <div style={{height:12}} />
+              <div className="hint" style={{ marginTop: 10 }}>
+                {ready ? "AI ready (offline)." : "AI not ready yet."}
+                {err ? `  Error: ${err}` : ""}
+              </div>
 
-          {!report?.issues?.length ? (
-            <div className="small">Upload and press Start to see detected issues + fixes.</div>
-          ) : (
-            <div className="list">
-              {report.issues.map(i => (
-                <div className="item" key={i.id}>
-                  <div className="itemTop">
-                    <div className="itemTitle">{i.title}</div>
-                    <span className={i.severity==="HIGH" ? "badge badgeBad" : i.severity==="MILD" ? "badge badgeWarn" : "badge badgeGood"}>
-                      {i.severity}
-                    </span>
-                  </div>
-                  <div className="itemText"><b>Measured:</b> {i.measured}</div>
-                  <div className="itemText"><b>Risk:</b> {i.whyItMatters}</div>
-                  <div className="itemText"><b>Fix:</b> {i.fix}</div>
+              {samples.length ? (
+                <div className="hint" style={{ marginTop: 8 }}>
+                  Timeline samples: {samples.length} (latest time: {samples[samples.length - 1].t.toFixed(1)}s)
                 </div>
-              ))}
+              ) : null}
             </div>
-          )}
+
+            {/* RIGHT */}
+            <RightPanel report={report} title="Details" />
+          </div>
         </div>
       </div>
     </div>

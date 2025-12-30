@@ -1,4 +1,6 @@
 import type { PoseLandmarkerResult } from "@mediapipe/tasks-vision";
+import { buildLeverReport } from "./leverAnalysis";
+
 
 type Pt = { x: number; y: number; z?: number; visibility?: number };
 
@@ -13,35 +15,31 @@ export type PostureIssue = {
   fix: string;
 };
 
-export type PostureReport = {
-  score: number;              // 0–100
-  risk: "Low" | "Medium" | "High";
-  angles: Record<string, number>;
-  issues: PostureIssue[];
+export type StrainLevel = "Low" | "Medium" | "High";
+
+export type LeverMetrics = {
+  shoulderMomentIndex: number;
+  lowBackMomentIndex: number;
+  strainIndex: number;
+  strainLevel: StrainLevel;
+  // Optional extras added by other pages (live/photo/video)
+  force?: { level: StrainLevel; value: number };
+  points?: any;
+  action?: any;
 };
 
-const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+export type PostureReport = {
+  score: number;              // 0–100
+  risk: StrainLevel;
+  angles: Record<string, number>;
+  issues: PostureIssue[];
+  lever?: LeverMetrics;
+};
 
-function angleABC(a: Pt, b: Pt, c: Pt) {
-  // angle at b formed by a-b-c, in degrees
-  const abx = a.x - b.x, aby = a.y - b.y;
-  const cbx = c.x - b.x, cby = c.y - b.y;
-  const dot = abx * cbx + aby * cby;
-  const ab = Math.hypot(abx, aby);
-  const cb = Math.hypot(cbx, cby);
-  const cos = clamp(dot / (ab * cb + 1e-9), -1, 1);
-  return (Math.acos(cos) * 180) / Math.PI;
+function toStrainLevel(x: any): StrainLevel {
+  return x === "Low" || x === "Medium" || x === "High" ? x : "Medium";
 }
 
-function mid(a: Pt, b: Pt): Pt {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
-
-function getKp(result: PoseLandmarkerResult, idx: number): Pt | null {
-  const lm = result.landmarks?.[0];
-  if (!lm || !lm[idx]) return null;
-  return { x: lm[idx].x, y: lm[idx].y, z: lm[idx].z, visibility: lm[idx].visibility };
-}
 
 // MediaPipe Pose landmark indices
 const KP = {
@@ -61,6 +59,39 @@ const KP = {
   RIGHT_EAR: 8,
 };
 
+function mid(a: Pt, b: Pt): Pt {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function getKp(result: PoseLandmarkerResult, idx: number): Pt | null {
+  const lm = result.landmarks?.[0];
+  if (!lm || !lm[idx]) return null;
+  return { x: lm[idx].x, y: lm[idx].y, z: lm[idx].z, visibility: lm[idx].visibility };
+}
+
+function dist(a: Pt, b: Pt) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.hypot(dx, dy);
+}
+
+function angleDeg(a: Pt, b: Pt, c: Pt) {
+  // angle at b between BA and BC
+  const abx = a.x - b.x;
+  const aby = a.y - b.y;
+  const cbx = c.x - b.x;
+  const cby = c.y - b.y;
+  const dot = abx * cbx + aby * cby;
+  const mag = Math.hypot(abx, aby) * Math.hypot(cbx, cby);
+  if (!mag) return 0;
+  const v = Math.max(-1, Math.min(1, dot / mag));
+  return (Math.acos(v) * 180) / Math.PI;
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
 export function buildReport(result: PoseLandmarkerResult | null): PostureReport | null {
   if (!result?.landmarks?.[0]?.length) return null;
 
@@ -76,8 +107,8 @@ export function buildReport(result: PoseLandmarkerResult | null): PostureReport 
   const rk = getKp(result, KP.RIGHT_KNEE);
   const la = getKp(result, KP.LEFT_ANKLE);
   const ra = getKp(result, KP.RIGHT_ANKLE);
-  const leAR = getKp(result, KP.LEFT_EAR);
-  const reAR = getKp(result, KP.RIGHT_EAR);
+  const lear = getKp(result, KP.LEFT_EAR);
+  const rear = getKp(result, KP.RIGHT_EAR);
 
   if (!ls || !rs || !lh || !rh) return null;
 
@@ -86,112 +117,105 @@ export function buildReport(result: PoseLandmarkerResult | null): PostureReport 
 
   const angles: Record<string, number> = {};
 
-  // Trunk lean: angle between vertical and hip->shoulder vector (approx)
-  {
-    const v = { x: shoulderMid.x - hipMid.x, y: shoulderMid.y - hipMid.y };
-    const vertical = { x: 0, y: -1 };
-    const dot = v.x * vertical.x + v.y * vertical.y;
-    const mag = Math.hypot(v.x, v.y);
-    const cos = clamp(dot / (mag + 1e-9), -1, 1);
-    angles.trunkLeanDeg = (Math.acos(cos) * 180) / Math.PI; // 0 upright
-  }
-
-  // Neck / forward head: ear vs shoulder horizontal offset -> pseudo angle
-  if (leAR && reAR) {
-    const earMid = mid(leAR, reAR);
-    const dx = earMid.x - shoulderMid.x;
-    angles.neckFlexionDeg = clamp(Math.abs(dx) * 120, 0, 60); // heuristic
-  } else {
-    angles.neckFlexionDeg = 0;
-  }
-
-  // Shoulder elevation asymmetry (vertical diff)
-  angles.shoulderTiltDeg = clamp(Math.abs(ls.y - rs.y) * 180, 0, 30);
-
   // Elbow angles
-  if (le && lw) angles.leftElbowDeg = angleABC(ls, le, lw);
-  if (re && rw) angles.rightElbowDeg = angleABC(rs, re, rw);
+  if (ls && le && lw) angles.leftElbow = angleDeg(ls, le, lw);
+  if (rs && re && rw) angles.rightElbow = angleDeg(rs, re, rw);
 
-  // Knee angles (best effort)
-  if (lk && la) angles.leftKneeDeg = angleABC(lh, lk, la);
-  if (rk && ra) angles.rightKneeDeg = angleABC(rh, rk, ra);
+  // Knee angles
+  if (lh && lk && la) angles.leftKnee = angleDeg(lh, lk, la);
+  if (rh && rk && ra) angles.rightKnee = angleDeg(rh, rk, ra);
+
+  // Trunk/neck heuristics
+  // Approx "neck tilt" based on ears vs shoulder mid
+  if (lear && rear) {
+    const earMid = mid(lear, rear);
+    const dy = shoulderMid.y - earMid.y;
+    const dx = earMid.x - shoulderMid.x;
+    const neckTilt = Math.atan2(dx, dy) * (180 / Math.PI);
+    angles.neckTilt = Math.abs(neckTilt);
+  }
+
+  // Shoulder elevation asymmetry
+  angles.shoulderSlope = Math.abs(ls.y - rs.y) * 100;
+
+  // Forward reach estimate (hands forward relative to shoulder)
+  if (lw && rw) {
+    const wristMid = mid(lw, rw);
+    angles.reach = Math.abs(wristMid.x - shoulderMid.x) * 100;
+  }
 
   const issues: PostureIssue[] = [];
 
-
-  const neck = angles.neckFlexionDeg ?? 0;
-  if (neck >= 35) {
+  if (angles.neckTilt !== undefined && angles.neckTilt > 18) {
     issues.push({
-      id: "neck-forward-high",
-      title: "Forward head posture (neck flexion)",
-      severity: "HIGH",
-      measured: `Neck flexion ~ ${neck.toFixed(0)}°`,
-      whyItMatters: "Can increase neck load, causing neck strain, stiffness, and headaches over time.",
-      fix: "Raise the screen to eye level, bring head back (gentle chin tuck), and sit tall with upper-back support."
-    });
-  } else if (neck >= 20) {
-    issues.push({
-      id: "neck-forward-mild",
-      title: "Forward head posture (mild)",
-      severity: "MILD",
-      measured: `Neck flexion ~ ${neck.toFixed(0)}°`,
-      whyItMatters: "May contribute to neck/upper-back fatigue during long sessions.",
-      fix: "Align ears over shoulders, bring screen closer, and take micro-breaks every 30–45 minutes."
+      id: "neck-tilt",
+      title: "Neck bent / forward head posture",
+      severity: angles.neckTilt > 28 ? "HIGH" : "MILD",
+      measured: `Neck tilt ~ ${Math.round(angles.neckTilt)}°`,
+      whyItMatters: "Increases load on cervical spine and can cause neck/shoulder pain.",
+      fix: "Bring screen to eye level, tuck chin slightly, keep ears over shoulders."
     });
   }
 
-  const trunk = angles.trunkLeanDeg ?? 0;
-  if (trunk >= 20) {
+  if (angles.shoulderSlope !== undefined && angles.shoulderSlope > 4.5) {
     issues.push({
-      id: "trunk-lean-high",
-      title: "Leaning forward (trunk)",
-      severity: "HIGH",
-      measured: `Trunk lean ~ ${trunk.toFixed(0)}°`,
-      whyItMatters: "Can overload lower back and increase shoulder/neck tension.",
-      fix: "Sit back fully, use lumbar support, and bring keyboard/mouse closer so elbows stay near your body."
-    });
-  } else if (trunk >= 10) {
-    issues.push({
-      id: "trunk-lean-mild",
-      title: "Leaning forward (mild)",
-      severity: "MILD",
-      measured: `Trunk lean ~ ${trunk.toFixed(0)}°`,
-      whyItMatters: "May cause fatigue and slouching during long work blocks.",
-      fix: "Reset posture: shoulders relaxed, ribs stacked over hips, feet flat, screen slightly higher."
-    });
-  }
-
-  const tilt = angles.shoulderTiltDeg ?? 0;
-  if (tilt >= 12) {
-    issues.push({
-      id: "shoulder-tilt",
+      id: "shoulder-slope",
       title: "Uneven shoulders",
-      severity: tilt >= 18 ? "HIGH" : "MILD",
-      measured: `Shoulder tilt ~ ${tilt.toFixed(0)}°`,
-      whyItMatters: "May indicate one-sided load (mouse/phone), contributing to neck and upper-trap pain.",
-      fix: "Center your body to screen, keep mouse close, avoid cradling phone, and relax shoulders down."
+      severity: angles.shoulderSlope > 8 ? "HIGH" : "MILD",
+      measured: `Height difference ~ ${angles.shoulderSlope.toFixed(1)}%`,
+      whyItMatters: "Asymmetry may increase strain on neck and upper back.",
+      fix: "Relax shoulders, adjust chair/armrests, center your posture."
     });
   }
 
-  const lel = angles.leftElbowDeg ?? 100;
-  const rel = angles.rightElbowDeg ?? 100;
-  const elbowBad = (d: number) => d < 75 || d > 135;
-  if (elbowBad(lel) || elbowBad(rel)) {
+  if (angles.reach !== undefined && angles.reach > 18) {
     issues.push({
-      id: "elbow-angle",
-      title: "Elbow angle not neutral",
-      severity: "MILD",
-      measured: `Elbows L ${lel.toFixed(0)}° / R ${rel.toFixed(0)}°`,
-      whyItMatters: "May increase forearm and shoulder tension and contribute to wrist discomfort.",
-      fix: "Adjust chair/desk height so elbows are near ~90–110°, forearms supported, and shoulders relaxed."
+      id: "reach",
+      title: "Hands reaching away from body",
+      severity: angles.reach > 30 ? "HIGH" : "MILD",
+      measured: `Reach offset ~ ${angles.reach.toFixed(0)}%`,
+      whyItMatters: "Longer reach increases lever arm and shoulder/low-back load.",
+      fix: "Bring work closer, keep elbows near body, reduce forward reach."
     });
   }
 
+  // Knee extension warnings
+  if (angles.leftKnee !== undefined && angles.leftKnee < 155) {
+    issues.push({
+      id: "left-knee",
+      title: "Left knee bent (sustained)",
+      severity: angles.leftKnee < 130 ? "HIGH" : "MILD",
+      measured: `Left knee angle ~ ${Math.round(angles.leftKnee)}°`,
+      whyItMatters: "Sustained knee bend can increase fatigue and discomfort.",
+      fix: "Adjust seat height/foot placement so knees are closer to neutral."
+    });
+  }
+  if (angles.rightKnee !== undefined && angles.rightKnee < 155) {
+    issues.push({
+      id: "right-knee",
+      title: "Right knee bent (sustained)",
+      severity: angles.rightKnee < 130 ? "HIGH" : "MILD",
+      measured: `Right knee angle ~ ${Math.round(angles.rightKnee)}°`,
+      whyItMatters: "Sustained knee bend can increase fatigue and discomfort.",
+      fix: "Adjust seat height/foot placement so knees are closer to neutral."
+    });
+  }
+
+  // Score heuristic
   let score = 100;
   for (const i of issues) score -= i.severity === "HIGH" ? 18 : 9;
   score = clamp(score, 0, 100);
 
   const risk = score >= 80 ? "Low" : score >= 55 ? "Medium" : "High";
+  const lever = buildLeverReport(result, angles);
 
-  return { score, risk, angles, issues };
+
+  return { score, risk, angles, issues, lever: lever ? {
+  shoulderMomentIndex: lever.shoulderMomentIndex,
+  lowBackMomentIndex: lever.lowBackMomentIndex,
+  strainIndex: lever.strainIndex,
+  strainLevel: toStrainLevel(lever.strainLevel)
+} : undefined };
+
+  
 }
